@@ -1,0 +1,9 @@
+.git
+.gitignore
+.ruff_cache
+.mplconfig
+.ipynb_checkpoints
+__pycache__
+*.py[cod]
+*.executed.ipynb
+artifacts
