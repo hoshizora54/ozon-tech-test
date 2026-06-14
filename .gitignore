@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.mplconfig/
+.ruff_cache/
+artifacts/
+*.executed.ipynb
