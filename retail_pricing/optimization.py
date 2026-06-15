@@ -91,9 +91,25 @@ def _price_bounds(item_data, current_price, cost, change_limit, minimum_margin):
     return lower, upper, historical_range_conflict
 
 
-def _objective_curves(base_demand, current_price, elasticity, cost, prices):
-    demand = base_demand * (prices / current_price) ** elasticity
-    return demand, prices * demand, (prices - cost) * demand
+def _candidate_grid(lower, upper, current_price, grid_size):
+    prices = np.linspace(lower, upper, grid_size)
+    if lower <= current_price <= upper:
+        prices = np.append(prices, current_price)
+    return np.unique(prices)
+
+
+def _elasticity_scenarios(elasticity_info):
+    values = elasticity_info[
+        ["elasticity", "sign_constrained_elasticity", "peer_prior"]
+    ].to_numpy(dtype=float)
+    return np.unique(np.clip(values, -5.0, -0.05))
+
+
+def _objective_scenarios(base_demand, current_price, elasticities, cost, prices):
+    demand = base_demand * (
+        prices[None, :] / current_price
+    ) ** elasticities[:, None]
+    return demand, prices[None, :] * demand, (prices[None, :] - cost) * demand
 
 
 def optimize_prices(
@@ -102,9 +118,10 @@ def optimize_prices(
     elasticities: pd.DataFrame,
     price_change_limit: float = 0.15,
     minimum_margin: float = 0.05,
+    minimum_robust_profit_uplift: float = 0.01,
     grid_size: int = 61,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Select sales-, GMV- and profit-optimal prices under guardrails."""
+    """Select robust sales-, GMV- and profit-optimal prices under guardrails."""
     context = make_next_day_context(model_frame)
     context["base_demand"] = np.clip(model.predict(context[MODEL_FEATURES]), 0, None)
     elasticity_by_item = elasticities.set_index("item_id")
@@ -131,10 +148,26 @@ def optimize_prices(
             applied_change_limit,
             minimum_margin,
         )
-        prices = np.linspace(lower, upper, grid_size)
-        demand, gmv, profit = _objective_curves(
-            row["base_demand"], current_price, elasticity, cost, prices
+        prices = _candidate_grid(lower, upper, current_price, grid_size)
+        elasticity_scenarios = _elasticity_scenarios(elasticity_info)
+        demand_scenarios, gmv_scenarios, profit_scenarios = _objective_scenarios(
+            row["base_demand"],
+            current_price,
+            elasticity_scenarios,
+            cost,
+            prices,
         )
+        demand, gmv, profit = _objective_scenarios(
+            row["base_demand"],
+            current_price,
+            np.array([elasticity]),
+            cost,
+            prices,
+        )
+        demand, gmv, profit = demand[0], gmv[0], profit[0]
+        worst_case_demand = demand_scenarios.min(axis=0)
+        worst_case_gmv = gmv_scenarios.min(axis=0)
+        worst_case_profit = profit_scenarios.min(axis=0)
         curve_rows.append(
             pd.DataFrame(
                 {
@@ -143,24 +176,47 @@ def optimize_prices(
                     "predicted_sales": demand,
                     "predicted_gmv": gmv,
                     "predicted_profit": profit,
+                    "worst_case_sales": worst_case_demand,
+                    "worst_case_gmv": worst_case_gmv,
+                    "worst_case_profit": worst_case_profit,
                 }
             )
         )
 
-        if row["base_demand"] < 1.0:
-            hold_index = int(np.argmin(np.abs(prices - current_price)))
-            sales_index = gmv_index = profit_index = hold_index
-            status = "low_demand_hold"
-        else:
-            sales_index = int(np.argmax(demand))
-            gmv_index = int(np.argmax(gmv))
-            profit_index = int(np.argmax(profit))
-            status = "optimized"
-
+        sales_index = int(np.argmax(worst_case_demand))
+        gmv_index = int(np.argmax(worst_case_gmv))
+        profit_index = int(np.argmax(worst_case_profit))
+        nearest_current_index = int(np.argmin(np.abs(prices - current_price)))
+        current_price_feasible = lower <= current_price <= upper
+        current_profit = (current_price - cost) * row["base_demand"]
+        best_robust_profit_uplift = (
+            worst_case_profit[profit_index] - current_profit
+        ) / max(abs(current_profit), 1.0)
+        status = "robust_optimized"
         if margin_floor_required:
             status = "margin_floor_correction"
+            if row["base_demand"] < 1.0:
+                sales_index = gmv_index = profit_index = nearest_current_index
         elif historical_range_conflict:
             status = "historical_range_conflict_hold"
+            sales_index = gmv_index = profit_index = nearest_current_index
+        elif not current_price_feasible:
+            status = "historical_range_reentry"
+            if row["base_demand"] < 1.0:
+                sales_index = gmv_index = profit_index = nearest_current_index
+        elif row["base_demand"] < 1.0:
+            sales_index = gmv_index = profit_index = nearest_current_index
+            status = "low_demand_hold"
+        elif best_robust_profit_uplift < minimum_robust_profit_uplift:
+            profit_index = nearest_current_index
+            status = "insufficient_robust_uplift_hold"
+
+        nominal_profit_uplift = (
+            profit[profit_index] - current_profit
+        ) / max(abs(current_profit), 1.0)
+        robust_profit_uplift = (
+            worst_case_profit[profit_index] - current_profit
+        ) / max(abs(current_profit), 1.0)
 
         recommendation_rows.append(
             {
@@ -173,6 +229,9 @@ def optimize_prices(
                 "historical_range_conflict": historical_range_conflict,
                 "elasticity": elasticity,
                 "elasticity_source": elasticity_source,
+                "elasticity_scenario_min": elasticity_scenarios.min(),
+                "elasticity_scenario_max": elasticity_scenarios.max(),
+                "elasticity_scenario_count": len(elasticity_scenarios),
                 "applied_price_change_limit": applied_change_limit,
                 "base_demand": row["base_demand"],
                 "sales_optimal_price": prices[sales_index],
@@ -180,6 +239,10 @@ def optimize_prices(
                 "profit_optimal_price": prices[profit_index],
                 "profit_optimal_sales": demand[profit_index],
                 "profit_at_optimum": profit[profit_index],
+                "worst_case_profit_at_optimum": worst_case_profit[profit_index],
+                "profit_at_current_price": current_profit,
+                "nominal_profit_uplift": nominal_profit_uplift,
+                "robust_profit_uplift": robust_profit_uplift,
                 "lower_guardrail": lower,
                 "upper_guardrail": upper,
                 "recommendation_status": status,
