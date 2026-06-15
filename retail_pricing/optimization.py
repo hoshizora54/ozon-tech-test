@@ -106,9 +106,7 @@ def optimize_prices(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Select sales-, GMV- and profit-optimal prices under guardrails."""
     context = make_next_day_context(model_frame)
-    context["base_demand"] = np.clip(
-        np.expm1(model.predict(context[MODEL_FEATURES])), 0, None
-    )
+    context["base_demand"] = np.clip(model.predict(context[MODEL_FEATURES]), 0, None)
     elasticity_by_item = elasticities.set_index("item_id")
     recommendation_rows, curve_rows = [], []
 

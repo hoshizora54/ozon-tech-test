@@ -18,15 +18,15 @@ class DemandModelResult:
 
 def create_demand_model() -> XGBRegressor:
     return XGBRegressor(
-        n_estimators=750,
-        learning_rate=0.035,
-        max_depth=5,
-        min_child_weight=8,
+        n_estimators=700,
+        learning_rate=0.04,
+        max_depth=4,
+        min_child_weight=16,
         subsample=0.85,
         colsample_bytree=0.90,
         reg_alpha=0.05,
         reg_lambda=5.0,
-        objective="reg:squarederror",
+        objective="reg:absoluteerror",
         eval_metric="mae",
         tree_method="hist",
         enable_categorical=True,
@@ -75,8 +75,8 @@ def walk_forward_validation(
             continue
 
         model = create_demand_model()
-        model.fit(train[MODEL_FEATURES], np.log1p(train["sales"]))
-        prediction = np.clip(np.expm1(model.predict(valid[MODEL_FEATURES])), 0, None)
+        model.fit(train[MODEL_FEATURES], train["sales"])
+        prediction = np.clip(model.predict(valid[MODEL_FEATURES]), 0, None)
         baseline = valid["roll_mean_30_clean"].clip(lower=0).to_numpy()
 
         for model_name, values in (
@@ -117,5 +117,5 @@ def fit_final_demand_model(model_frame: pd.DataFrame) -> XGBRegressor:
     ready = model_frame.dropna(subset=MODEL_FEATURES)
     train = ready[~ready["is_candidate_anomaly"]]
     model = create_demand_model()
-    model.fit(train[MODEL_FEATURES], np.log1p(train["sales"]))
+    model.fit(train[MODEL_FEATURES], train["sales"])
     return model

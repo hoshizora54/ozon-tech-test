@@ -27,7 +27,7 @@ def root_cause_report(
         shap_values[:, :-1], columns=MODEL_FEATURES, index=selected.index
     )
     grouped = _group_feature_contributions(contributions)
-    predicted_sales = np.clip(np.expm1(shap_values.sum(axis=1)), 0, None)
+    predicted_sales = np.clip(shap_values.sum(axis=1), 0, None)
 
     context_groups = [name for name in FEATURE_GROUPS if name != "identity"]
     top_driver = grouped[context_groups].abs().idxmax(axis=1)
@@ -57,6 +57,6 @@ def root_cause_report(
         report["sales"] / np.maximum(report["expected_sales"], 1.0)
     )
     report["largest_context_driver"] = top_driver.to_numpy()
-    report["driver_log_effect"] = top_effect
+    report["driver_sales_effect"] = top_effect
     report["diagnosis"] = diagnosis
     return report.sort_values("ranking_score", ascending=False)
